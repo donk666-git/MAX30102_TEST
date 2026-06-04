@@ -15,8 +15,11 @@ static constexpr uint8_t REF_MEAN_FILTER_SIZE = 17;
 static constexpr uint8_t REF_BPM_SAMPLE_SIZE = 15;
 static constexpr uint8_t REF_RESET_SPO2_EVERY_N_PULSES = 6;
 static constexpr float REF_DC_ALPHA = 0.925f;
-static constexpr uint16_t REF_PULSE_MIN_THRESHOLD = 60;
-static constexpr uint16_t REF_PULSE_MAX_THRESHOLD = 2000;
+static constexpr uint16_t REF_PULSE_MIN_THRESHOLD = 250;
+static constexpr uint16_t REF_PULSE_MAX_THRESHOLD = 5000;
+static constexpr float REF_VALID_BPM_MIN = 45.0f;
+static constexpr uint16_t REF_DUPLICATE_PEAK_MS = 240;
+static constexpr float REF_SHORT_INTERVAL_RATIO = 0.55f;
 static constexpr uint32_t REF_ACCEPTABLE_INTENSITY_DIFF = 65000;
 static constexpr uint32_t REF_RED_LED_ADJUSTMENT_MS = 500;
 
@@ -89,8 +92,7 @@ struct HealthState {
     float mean_sum = 0.0f;
     uint8_t mean_count = 0;
 
-    float bpm_values[REF_BPM_SAMPLE_SIZE] = {0.0f};
-    float bpm_sum = 0.0f;
+    uint16_t beat_intervals[REF_BPM_SAMPLE_SIZE] = {0};
     uint8_t bpm_count = 0;
     uint8_t bpm_index = 0;
 
@@ -237,11 +239,67 @@ static uint8_t fifo_available_samples(uint8_t wr_ptr, uint8_t rd_ptr, uint8_t ov
 static void reset_bpm_average()
 {
     for (uint8_t i = 0; i < REF_BPM_SAMPLE_SIZE; ++i) {
-        s_health.bpm_values[i] = 0.0f;
+        s_health.beat_intervals[i] = 0;
     }
-    s_health.bpm_sum = 0.0f;
     s_health.bpm_count = 0;
     s_health.bpm_index = 0;
+}
+
+static float median_interval_ms()
+{
+    if (s_health.bpm_count == 0) {
+        return 0.0f;
+    }
+
+    uint16_t sorted[REF_BPM_SAMPLE_SIZE] = {0};
+    for (uint8_t i = 0; i < s_health.bpm_count; ++i) {
+        sorted[i] = s_health.beat_intervals[i];
+    }
+
+    for (uint8_t i = 1; i < s_health.bpm_count; ++i) {
+        uint16_t key = sorted[i];
+        int8_t j = i - 1;
+        while (j >= 0 && sorted[j] > key) {
+            sorted[j + 1] = sorted[j];
+            --j;
+        }
+        sorted[j + 1] = key;
+    }
+
+    if ((s_health.bpm_count & 1) != 0) {
+        return static_cast<float>(sorted[s_health.bpm_count / 2]);
+    }
+
+    uint8_t upper = s_health.bpm_count / 2;
+    return (static_cast<float>(sorted[upper - 1]) + static_cast<float>(sorted[upper])) * 0.5f;
+}
+
+static bool is_duplicate_peak_interval(unsigned long beat_duration)
+{
+    if (beat_duration < REF_DUPLICATE_PEAK_MS) {
+        return true;
+    }
+
+    if (s_health.bpm_count < 4) {
+        return false;
+    }
+
+    float median_ms = median_interval_ms();
+    if (median_ms <= 0.0f) {
+        return false;
+    }
+
+    return static_cast<float>(beat_duration) < median_ms * REF_SHORT_INTERVAL_RATIO;
+}
+
+static void add_accepted_interval(uint16_t beat_duration)
+{
+    s_health.beat_intervals[s_health.bpm_index] = beat_duration;
+    s_health.bpm_index = (s_health.bpm_index + 1) % REF_BPM_SAMPLE_SIZE;
+
+    if (s_health.bpm_count < REF_BPM_SAMPLE_SIZE) {
+        ++s_health.bpm_count;
+    }
 }
 
 static void reset_signal_state(bool keep_values)
@@ -390,26 +448,36 @@ static bool ref_detect_pulse(float sensor_value, unsigned long now)
             }
 
             s_health.pulse_state = REF_PULSE_TRACE_DOWN;
+            s_reading.last_candidate_ms = beat_duration <= UINT16_MAX ? static_cast<uint16_t>(beat_duration) : UINT16_MAX;
+            s_reading.last_candidate_bpm = raw_bpm;
+            s_reading.last_peak_value = s_health.last_beat_threshold;
 
             if (beat_duration > 2500) {
                 reset_bpm_average();
             }
 
-            if (raw_bpm < 50.0f || raw_bpm > 220.0f) {
+            if (raw_bpm < REF_VALID_BPM_MIN || is_duplicate_peak_interval(beat_duration)) {
+                ++s_reading.rejected_pulses;
                 return false;
             }
 
-            s_health.bpm_sum -= s_health.bpm_values[s_health.bpm_index];
-            s_health.bpm_values[s_health.bpm_index] = raw_bpm;
-            s_health.bpm_sum += s_health.bpm_values[s_health.bpm_index];
-            s_health.bpm_index = (s_health.bpm_index + 1) % REF_BPM_SAMPLE_SIZE;
+            uint16_t accepted_ms = beat_duration <= UINT16_MAX ?
+                                   static_cast<uint16_t>(beat_duration) :
+                                   UINT16_MAX;
+            add_accepted_interval(accepted_ms);
 
-            if (s_health.bpm_count < REF_BPM_SAMPLE_SIZE) {
-                ++s_health.bpm_count;
+            float robust_interval = median_interval_ms();
+            float robust_bpm = robust_interval > 0.0f ? 60000.0f / robust_interval : raw_bpm;
+            if (s_health.bpm <= 0.0f) {
+                s_health.bpm = robust_bpm;
+            } else {
+                s_health.bpm = s_health.bpm * 0.65f + robust_bpm * 0.35f;
             }
 
-            s_health.bpm = s_health.bpm_sum / s_health.bpm_count;
             s_reading.bpm = s_health.bpm;
+            s_reading.last_accepted_ms = s_reading.last_candidate_ms;
+            s_reading.last_accepted_bpm = raw_bpm;
+            ++s_reading.accepted_pulses;
             s_health.last_bpm_ms = now;
             return true;
         }

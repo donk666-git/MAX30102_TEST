@@ -83,6 +83,32 @@ static void report_serial()
     Serial.print(" Pulse=");
     Serial.print(r.pulse_detected ? 1 : 0);
 
+    Serial.print(" Cand=");
+    Serial.print(r.last_candidate_ms);
+    Serial.print("ms/");
+    if (r.last_candidate_bpm > 0.0f) {
+        Serial.print(r.last_candidate_bpm, 1);
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" Beat=");
+    Serial.print(r.last_accepted_ms);
+    Serial.print("ms/");
+    if (r.last_accepted_bpm > 0.0f) {
+        Serial.print(r.last_accepted_bpm, 1);
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" Peak=");
+    Serial.print(r.last_peak_value, 0);
+
+    Serial.print(" Acc/Rej=");
+    Serial.print(r.accepted_pulses);
+    Serial.print("/");
+    Serial.print(r.rejected_pulses);
+
     Serial.print(" Sat=");
     Serial.print(r.saturated ? 1 : 0);
 

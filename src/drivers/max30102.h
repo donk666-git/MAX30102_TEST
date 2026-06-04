@@ -11,7 +11,14 @@ struct Max30102Reading {
     float ir_cardiogram = 0.0f;
     float dc_filtered_ir = 0.0f;
     float dc_filtered_red = 0.0f;
+    float last_candidate_bpm = 0.0f;
+    float last_accepted_bpm = 0.0f;
+    float last_peak_value = 0.0f;
     uint32_t sample_count = 0;
+    uint32_t accepted_pulses = 0;
+    uint32_t rejected_pulses = 0;
+    uint16_t last_candidate_ms = 0;
+    uint16_t last_accepted_ms = 0;
     uint16_t samples_last_second = 0;
     uint8_t fifo_wr_ptr = 0;
     uint8_t fifo_rd_ptr = 0;

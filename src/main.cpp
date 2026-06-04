@@ -1,0 +1,158 @@
+#include <Arduino.h>
+
+#include "config.h"
+#include "drivers/i2c_bus.h"
+#include "drivers/max30102.h"
+#include "ui/max30102_debug_ui.h"
+
+static constexpr unsigned long DISPLAY_REFRESH_MS = 200;
+static constexpr unsigned long SERIAL_REPORT_MS = 1000;
+
+static void report_serial()
+{
+    const Max30102Reading &r = max30102_reading();
+
+    Serial.print("Present=");
+    Serial.print(r.present ? 1 : 0);
+
+    Serial.print(" Init=");
+    Serial.print(r.initialized ? 1 : 0);
+
+    Serial.print(" Err=");
+    Serial.print(r.init_error);
+    Serial.print("(");
+    Serial.print(max30102_init_error_text(r.init_error));
+    Serial.print(")");
+
+    Serial.print(" Rev=0x");
+    Serial.print(r.rev_id, HEX);
+
+    Serial.print(" Part=0x");
+    Serial.print(r.part_id, HEX);
+
+    Serial.print(" ");
+
+    Serial.print("Active=");
+    Serial.print(r.measurement_active ? 1 : 0);
+
+    Serial.print(" Rem=");
+    if (r.measurement_active) {
+        if (r.active_remaining_ms > 0) {
+            Serial.print(r.active_remaining_ms / 1000UL);
+            Serial.print("s");
+        } else {
+            Serial.print("LIVE");
+        }
+    } else {
+        long wait_ms = static_cast<long>(r.next_measurement_ms - millis());
+        Serial.print((wait_ms > 0 ? wait_ms : 0) / 1000L);
+        Serial.print("s");
+    }
+
+    Serial.print(" Samples=");
+    Serial.print(r.sample_count);
+
+    Serial.print(" Rate=");
+    Serial.print(r.samples_last_second);
+    Serial.print("/s");
+
+    Serial.print(" IR=");
+    Serial.print(r.ir);
+
+    Serial.print(" AC=");
+    Serial.print(r.ir_cardiogram, 1);
+
+    Serial.print(" BPM=");
+    if (r.bpm > 0.0f) {
+        Serial.print(r.bpm, 1);
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" SpO2=");
+    if (r.spo2 > 0.0f) {
+        Serial.print(r.spo2, 1);
+        Serial.print("%");
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" Finger=");
+    Serial.print(r.finger_present ? 1 : 0);
+
+    Serial.print(" Pulse=");
+    Serial.print(r.pulse_detected ? 1 : 0);
+
+    Serial.print(" Sat=");
+    Serial.print(r.saturated ? 1 : 0);
+
+    Serial.print(" FIFO=");
+    Serial.print(r.fifo_wr_ptr, HEX);
+    Serial.print("/");
+    Serial.print(r.fifo_rd_ptr, HEX);
+    Serial.print("/");
+    Serial.print(r.fifo_ovf, HEX);
+
+    Serial.print(" LED=");
+    Serial.print(r.red_led_current, HEX);
+    Serial.print("/");
+    Serial.print(r.ir_led_current, HEX);
+
+    Serial.print(" Mode=0x");
+    Serial.print(r.mode_reg, HEX);
+
+    Serial.print(" SpO2Cfg=0x");
+    Serial.println(r.spo2_config, HEX);
+}
+
+void setup()
+{
+    delay(1000);
+
+    Serial.begin(115200, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+    delay(500);
+
+    Serial.println();
+    Serial.println("===== MAX30102 reference algorithm test =====");
+
+    max30102_debug_ui_begin();
+    i2c_bus_init();
+    delay(300);
+    i2c_scan(Serial);
+
+    bool max_found = max30102_begin();
+    Serial.print("MAX30102 ");
+    Serial.println(max_found ? "init OK" : "init FAILED");
+    Serial.print("Init detail: ");
+    Serial.println(max30102_init_error_text(max30102_reading().init_error));
+    Serial.print("REV_ID=0x");
+    Serial.print(max30102_reading().rev_id, HEX);
+    Serial.print(" PART_ID=0x");
+    Serial.println(max30102_reading().part_id, HEX);
+    Serial.println("Mode: continuous realtime sampling");
+
+    max30102_debug_ui_update(max30102_reading());
+}
+
+void loop()
+{
+    static unsigned long last_report = 0;
+    static unsigned long last_display_refresh = 0;
+
+    bool got_sample = max30102_update();
+    const Max30102Reading &reading = max30102_reading();
+    max30102_debug_ui_push_sample(reading, got_sample);
+
+    unsigned long now = millis();
+    if (now - last_report >= SERIAL_REPORT_MS) {
+        last_report = now;
+        report_serial();
+    }
+
+    if (now - last_display_refresh >= DISPLAY_REFRESH_MS) {
+        last_display_refresh = now;
+        max30102_debug_ui_update(reading);
+    }
+
+    delay(1);
+}

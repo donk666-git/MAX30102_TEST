@@ -3,6 +3,7 @@
 #include "config.h"
 #include "drivers/i2c_bus.h"
 #include "drivers/max30102.h"
+#include "drivers/max30205.h"
 #include "ui/max30102_debug_ui.h"
 
 static constexpr unsigned long DISPLAY_REFRESH_MS = 200;
@@ -11,6 +12,7 @@ static constexpr unsigned long SERIAL_REPORT_MS = 1000;
 static void report_serial()
 {
     const Max30102Reading &r = max30102_reading();
+    const Max30205Reading &t = max30205_reading();
 
     Serial.print("Present=");
     Serial.print(r.present ? 1 : 0);
@@ -88,6 +90,48 @@ static void report_serial()
     Serial.print(r.spo2_red_amp, 0);
     Serial.print("/");
     Serial.print(r.spo2_ir_amp, 0);
+
+    Serial.print(" Temp=");
+    if (t.valid) {
+        Serial.print(t.temperature_c, 2);
+        Serial.print("C");
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" Body=");
+    if (t.body_valid) {
+        Serial.print(t.body_temperature_c, 2);
+        Serial.print("C");
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" TBase=");
+    if (t.baseline_temperature_c > 0.0f) {
+        Serial.print(t.baseline_temperature_c, 2);
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" TContact=");
+    Serial.print(t.contact_detected ? 1 : 0);
+    Serial.print("/");
+    Serial.print(t.contact_elapsed_ms / 1000UL);
+    Serial.print("s/");
+    Serial.print(t.stability_range_c, 2);
+
+    Serial.print(" TStat=");
+    Serial.print(t.present ? 1 : 0);
+    Serial.print("/");
+    Serial.print(t.initialized ? 1 : 0);
+    Serial.print("/");
+    Serial.print(t.error_count);
+    Serial.print("/");
+    Serial.print(t.init_error);
+    Serial.print("(");
+    Serial.print(max30205_init_error_text(t.init_error));
+    Serial.print(")");
 
     Serial.print(" Finger=");
     Serial.print(r.finger_present ? 1 : 0);
@@ -177,7 +221,15 @@ void setup()
     Serial.println(max30102_reading().part_id, HEX);
     Serial.println("Mode: continuous realtime sampling");
 
-    max30102_debug_ui_update(max30102_reading());
+    bool temp_found = max30205_begin();
+    Serial.print("MAX30205 ");
+    Serial.println(temp_found ? "init OK" : "init FAILED");
+    Serial.print("Temp init detail: ");
+    Serial.println(max30205_init_error_text(max30205_reading().init_error));
+    Serial.print("Temp config=0x");
+    Serial.println(max30205_reading().config, HEX);
+
+    max30102_debug_ui_update(max30102_reading(), max30205_reading());
 }
 
 void loop()
@@ -186,7 +238,9 @@ void loop()
     static unsigned long last_display_refresh = 0;
 
     bool got_sample = max30102_update();
+    max30205_update();
     const Max30102Reading &reading = max30102_reading();
+    const Max30205Reading &temperature = max30205_reading();
     max30102_debug_ui_push_sample(reading, got_sample);
 
     unsigned long now = millis();
@@ -197,7 +251,7 @@ void loop()
 
     if (now - last_display_refresh >= DISPLAY_REFRESH_MS) {
         last_display_refresh = now;
-        max30102_debug_ui_update(reading);
+        max30102_debug_ui_update(reading, temperature);
     }
 
     delay(1);

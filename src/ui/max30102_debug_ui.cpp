@@ -188,8 +188,9 @@ static void draw_display_shell()
     tft.drawCircle(SCREEN_CX, SCREEN_CY, 111, COLOR_GRID);
 
     draw_centered_text("MAX30102 REF ALG", 18, 1, COLOR_BLUE, COLOR_BG);
-    draw_small_text("SpO2", 34, 112, COLOR_BLUE, COLOR_BG);
-    draw_small_text("Hz", 158, 112, COLOR_GREEN, COLOR_BG);
+    draw_small_text("SpO2", 24, 112, COLOR_BLUE, COLOR_BG);
+    draw_small_text("Temp", 96, 112, COLOR_GOLD, COLOR_BG);
+    draw_small_text("Hz", 172, 112, COLOR_GREEN, COLOR_BG);
     draw_small_text("ref-filter waveform", 62, 214, COLOR_MUTED, COLOR_BG);
     draw_wave_frame();
 }
@@ -213,7 +214,7 @@ void max30102_debug_ui_push_sample(const Max30102Reading &reading, bool got_samp
                     reading.measurement_active && reading.finger_present && !reading.saturated);
 }
 
-void max30102_debug_ui_update(const Max30102Reading &reading)
+void max30102_debug_ui_update(const Max30102Reading &reading, const Max30205Reading &temperature)
 {
     if (!s_display_ready) {
         return;
@@ -235,17 +236,30 @@ void max30102_debug_ui_update(const Max30102Reading &reading)
     }
     draw_centered_text("BPM", 102, 1, COLOR_MUTED, COLOR_BG);
 
-    tft.fillRect(28, 122, 72, 12, COLOR_BG);
+    tft.fillRect(20, 122, 62, 12, COLOR_BG);
     if (reading.spo2 > 0.0f) {
         snprintf(buf, sizeof(buf), "%.1f%%", reading.spo2);
     } else {
         snprintf(buf, sizeof(buf), "--");
     }
-    draw_small_text(buf, 32, 122, reading.spo2 > 0.0f ? COLOR_BLUE : COLOR_MUTED, COLOR_BG);
+    draw_small_text(buf, 24, 122, reading.spo2 > 0.0f ? COLOR_BLUE : COLOR_MUTED, COLOR_BG);
 
-    tft.fillRect(144, 122, 60, 12, COLOR_BG);
+    tft.fillRect(88, 122, 66, 12, COLOR_BG);
+    if (temperature.body_valid) {
+        snprintf(buf, sizeof(buf), "%.1fC", temperature.body_temperature_c);
+    } else if (temperature.valid) {
+        snprintf(buf, sizeof(buf), "%.1fC", temperature.temperature_c);
+    } else {
+        snprintf(buf, sizeof(buf), "--");
+    }
+    draw_small_text(buf, 96, 122,
+                    temperature.body_valid ? COLOR_GREEN :
+                    (temperature.valid ? COLOR_GOLD : COLOR_MUTED),
+                    COLOR_BG);
+
+    tft.fillRect(162, 122, 48, 12, COLOR_BG);
     snprintf(buf, sizeof(buf), "%u", reading.samples_last_second);
-    draw_small_text(buf, 158, 122, reading.samples_last_second > 0 ? COLOR_GREEN : COLOR_MUTED, COLOR_BG);
+    draw_small_text(buf, 172, 122, reading.samples_last_second > 0 ? COLOR_GREEN : COLOR_MUTED, COLOR_BG);
 
     tft.fillRect(64, 222, 112, 10, COLOR_BG);
     if (reading.measurement_active) {

@@ -16,5 +16,6 @@ static constexpr int PIN_TFT_MOSI = 6;
 static constexpr int PIN_TFT_SCLK = 5;
 
 static constexpr uint8_t MAX30102_ADDR = 0x57;
+static constexpr uint8_t MAX30205_ADDR = 0x48;
 
 #endif

@@ -13,15 +13,26 @@ static constexpr unsigned long MEASUREMENT_ACTIVE_MS = 0;
 
 static constexpr uint8_t REF_MEAN_FILTER_SIZE = 17;
 static constexpr uint8_t REF_BPM_SAMPLE_SIZE = 15;
-static constexpr uint8_t REF_RESET_SPO2_EVERY_N_PULSES = 6;
+static constexpr uint8_t REF_BPM_LOCK_MIN_INTERVALS = 5;
 static constexpr float REF_DC_ALPHA = 0.925f;
-static constexpr uint16_t REF_PULSE_MIN_THRESHOLD = 250;
+static constexpr uint16_t REF_PULSE_MIN_THRESHOLD = 450;
 static constexpr uint16_t REF_PULSE_MAX_THRESHOLD = 5000;
 static constexpr float REF_VALID_BPM_MIN = 45.0f;
 static constexpr uint16_t REF_DUPLICATE_PEAK_MS = 240;
-static constexpr float REF_SHORT_INTERVAL_RATIO = 0.55f;
+static constexpr float REF_SHORT_INTERVAL_RATIO = 0.62f;
+static constexpr float REF_FAST_CONFIRM_RATIO = 0.25f;
+static constexpr uint16_t REF_FAST_TRANSITION_MIN_MS = 300;
+static constexpr unsigned long REF_STARTUP_DISCARD_MS = 3000;
+static constexpr unsigned long REF_ARTIFACT_DISCARD_MS = 900;
+static constexpr float REF_ARTIFACT_CARDIOGRAM_LIMIT = 7000.0f;
 static constexpr uint32_t REF_ACCEPTABLE_INTENSITY_DIFF = 65000;
 static constexpr uint32_t REF_RED_LED_ADJUSTMENT_MS = 500;
+static constexpr uint16_t SPO2_MIN_WINDOW_SAMPLES = 20;
+static constexpr float SPO2_MIN_DC = 1000.0f;
+static constexpr float SPO2_MIN_AC_AMPLITUDE = 20.0f;
+static constexpr float SPO2_RATIO_MIN = 0.25f;
+static constexpr float SPO2_RATIO_MAX = 1.80f;
+static constexpr float SPO2_FILTER_ALPHA = 0.30f;
 
 static constexpr uint8_t FIFO_CONFIG = 0x10;
 static constexpr uint8_t SPO2_CONFIG = 0x67;
@@ -75,6 +86,7 @@ struct HealthState {
     float spo2 = 0.0f;
     unsigned long last_bpm_ms = 0;
     unsigned long last_spo2_ms = 0;
+    unsigned long settle_until_ms = 0;
 
     RefPulseState pulse_state = REF_PULSE_IDLE;
     float prev_sensor_value = 0.0f;
@@ -96,10 +108,17 @@ struct HealthState {
     uint8_t bpm_count = 0;
     uint8_t bpm_index = 0;
 
-    float ir_ac_sq_sum = 0.0f;
-    float red_ac_sq_sum = 0.0f;
-    uint16_t samples_recorded = 0;
     uint16_t pulses_detected = 0;
+    bool spo2_window_started = false;
+    float spo2_red_ac_min = 0.0f;
+    float spo2_red_ac_max = 0.0f;
+    float spo2_ir_ac_min = 0.0f;
+    float spo2_ir_ac_max = 0.0f;
+    float spo2_red_dc_sum = 0.0f;
+    float spo2_ir_dc_sum = 0.0f;
+    uint16_t spo2_window_samples = 0;
+    uint16_t pending_short_interval_ms = 0;
+    unsigned long pending_short_ms = 0;
 };
 
 static bool s_present = false;
@@ -116,6 +135,9 @@ static unsigned long s_measurement_started_ms = 0;
 static unsigned long s_next_measurement_ms = 0;
 
 static void reset_signal_state(bool keep_values);
+static void reset_bpm_average();
+static void reset_spo2_window();
+static void begin_settle(unsigned long now, unsigned long duration_ms, bool reset_bpm);
 
 static bool write_reg_checked(uint8_t reg, uint8_t value)
 {
@@ -153,6 +175,9 @@ static void refresh_schedule_fields(unsigned long now)
         s_reading.active_elapsed_ms = 0;
         s_reading.active_remaining_ms = 0;
     }
+
+    s_reading.settling = s_health.finger_present && now < s_health.settle_until_ms;
+    s_reading.settle_remaining_ms = s_reading.settling ? s_health.settle_until_ms - now : 0;
 }
 
 static bool set_led_current(uint8_t red_current, uint8_t ir_current)
@@ -218,6 +243,7 @@ static void handle_saturation(uint32_t red, uint32_t ir, unsigned long now)
     if (next_red != s_red_led_current || next_ir != s_ir_led_current) {
         set_led_current(next_red, next_ir);
         reset_signal_state(true);
+        begin_settle(now, REF_ARTIFACT_DISCARD_MS, false);
     }
 
     s_last_saturation_adjust_ms = now;
@@ -243,6 +269,45 @@ static void reset_bpm_average()
     }
     s_health.bpm_count = 0;
     s_health.bpm_index = 0;
+}
+
+static void reset_spo2_window()
+{
+    s_health.spo2_window_started = false;
+    s_health.spo2_red_ac_min = 0.0f;
+    s_health.spo2_red_ac_max = 0.0f;
+    s_health.spo2_ir_ac_min = 0.0f;
+    s_health.spo2_ir_ac_max = 0.0f;
+    s_health.spo2_red_dc_sum = 0.0f;
+    s_health.spo2_ir_dc_sum = 0.0f;
+    s_health.spo2_window_samples = 0;
+}
+
+static void begin_settle(unsigned long now, unsigned long duration_ms, bool reset_bpm)
+{
+    s_health.settle_until_ms = now + duration_ms;
+    s_reading.settling = true;
+    s_reading.settle_remaining_ms = duration_ms;
+
+    s_health.pulse_state = REF_PULSE_IDLE;
+    s_health.prev_sensor_value = 0.0f;
+    s_health.values_went_down = 0;
+    s_health.current_beat = 0;
+    s_health.last_beat = 0;
+    s_health.last_beat_threshold = 0.0f;
+    s_health.pending_short_interval_ms = 0;
+    s_health.pending_short_ms = 0;
+    reset_spo2_window();
+
+    if (reset_bpm) {
+        reset_bpm_average();
+        s_health.bpm = 0.0f;
+        s_health.spo2 = 0.0f;
+        s_health.last_bpm_ms = 0;
+        s_health.last_spo2_ms = 0;
+        s_reading.bpm = 0.0f;
+        s_reading.spo2 = 0.0f;
+    }
 }
 
 static float median_interval_ms()
@@ -302,6 +367,37 @@ static void add_accepted_interval(uint16_t beat_duration)
     }
 }
 
+static bool confirm_or_reject_short_interval(unsigned long beat_duration, unsigned long now)
+{
+    if (!is_duplicate_peak_interval(beat_duration)) {
+        s_health.pending_short_interval_ms = 0;
+        s_health.pending_short_ms = 0;
+        return true;
+    }
+
+    if (beat_duration < REF_FAST_TRANSITION_MIN_MS || beat_duration > UINT16_MAX) {
+        s_health.pending_short_interval_ms = 0;
+        s_health.pending_short_ms = 0;
+        return false;
+    }
+
+    if (s_health.pending_short_interval_ms > 0 && now - s_health.pending_short_ms < 2500) {
+        float previous = static_cast<float>(s_health.pending_short_interval_ms);
+        float delta_ratio = fabsf(static_cast<float>(beat_duration) - previous) / previous;
+        if (delta_ratio <= REF_FAST_CONFIRM_RATIO) {
+            reset_bpm_average();
+            add_accepted_interval(s_health.pending_short_interval_ms);
+            s_health.pending_short_interval_ms = 0;
+            s_health.pending_short_ms = 0;
+            return true;
+        }
+    }
+
+    s_health.pending_short_interval_ms = static_cast<uint16_t>(beat_duration);
+    s_health.pending_short_ms = now;
+    return false;
+}
+
 static void reset_signal_state(bool keep_values)
 {
     s_health.ir_dc = 0.0f;
@@ -309,16 +405,17 @@ static void reset_signal_state(bool keep_values)
     s_health.dc_ir = {};
     s_health.dc_red = {};
     s_health.lpb_ir = {};
-    s_health.ir_ac_sq_sum = 0.0f;
-    s_health.red_ac_sq_sum = 0.0f;
-    s_health.samples_recorded = 0;
+    reset_spo2_window();
     s_health.pulses_detected = 0;
     s_health.pulse_state = REF_PULSE_IDLE;
+    s_health.settle_until_ms = 0;
     s_health.prev_sensor_value = 0.0f;
     s_health.values_went_down = 0;
     s_health.current_beat = 0;
     s_health.last_beat = 0;
     s_health.last_beat_threshold = 0.0f;
+    s_health.pending_short_interval_ms = 0;
+    s_health.pending_short_ms = 0;
 
     for (uint8_t i = 0; i < REF_MEAN_FILTER_SIZE; ++i) {
         s_health.mean_values[i] = 0.0f;
@@ -333,6 +430,11 @@ static void reset_signal_state(bool keep_values)
     s_reading.dc_filtered_ir = 0.0f;
     s_reading.dc_filtered_red = 0.0f;
     s_reading.red_ir_dc_diff = 0;
+    s_reading.spo2_ratio = 0.0f;
+    s_reading.spo2_red_amp = 0.0f;
+    s_reading.spo2_ir_amp = 0.0f;
+    s_reading.settling = false;
+    s_reading.settle_remaining_ms = 0;
 
     if (!keep_values) {
         s_health.bpm = 0.0f;
@@ -456,7 +558,7 @@ static bool ref_detect_pulse(float sensor_value, unsigned long now)
                 reset_bpm_average();
             }
 
-            if (raw_bpm < REF_VALID_BPM_MIN || is_duplicate_peak_interval(beat_duration)) {
+            if (raw_bpm < REF_VALID_BPM_MIN || !confirm_or_reject_short_interval(beat_duration, now)) {
                 ++s_reading.rejected_pulses;
                 return false;
             }
@@ -465,6 +567,14 @@ static bool ref_detect_pulse(float sensor_value, unsigned long now)
                                    static_cast<uint16_t>(beat_duration) :
                                    UINT16_MAX;
             add_accepted_interval(accepted_ms);
+
+            s_reading.last_accepted_ms = s_reading.last_candidate_ms;
+            s_reading.last_accepted_bpm = raw_bpm;
+            ++s_reading.accepted_pulses;
+
+            if (s_health.bpm <= 0.0f && s_health.bpm_count < REF_BPM_LOCK_MIN_INTERVALS) {
+                return true;
+            }
 
             float robust_interval = median_interval_ms();
             float robust_bpm = robust_interval > 0.0f ? 60000.0f / robust_interval : raw_bpm;
@@ -475,9 +585,6 @@ static bool ref_detect_pulse(float sensor_value, unsigned long now)
             }
 
             s_reading.bpm = s_health.bpm;
-            s_reading.last_accepted_ms = s_reading.last_candidate_ms;
-            s_reading.last_accepted_bpm = raw_bpm;
-            ++s_reading.accepted_pulses;
             s_health.last_bpm_ms = now;
             return true;
         }
@@ -500,31 +607,78 @@ static bool ref_detect_pulse(float sensor_value, unsigned long now)
 
 static void update_spo2_after_pulse(unsigned long now)
 {
-    if (s_health.samples_recorded == 0) {
+    if (s_health.spo2_window_samples < SPO2_MIN_WINDOW_SAMPLES) {
         return;
     }
 
-    float red_rms = sqrtf(s_health.red_ac_sq_sum / static_cast<float>(s_health.samples_recorded));
-    float ir_rms = sqrtf(s_health.ir_ac_sq_sum / static_cast<float>(s_health.samples_recorded));
+    float red_amp = s_health.spo2_red_ac_max - s_health.spo2_red_ac_min;
+    float ir_amp = s_health.spo2_ir_ac_max - s_health.spo2_ir_ac_min;
+    s_reading.spo2_red_amp = red_amp;
+    s_reading.spo2_ir_amp = ir_amp;
 
-    if (red_rms <= 1.0f || ir_rms <= 1.0f) {
+    if (red_amp < SPO2_MIN_AC_AMPLITUDE || ir_amp < SPO2_MIN_AC_AMPLITUDE) {
         return;
     }
 
-    float ratio_rms = logf(red_rms) / logf(ir_rms);
-    if (!isfinite(ratio_rms)) {
+    float samples = static_cast<float>(s_health.spo2_window_samples);
+    float red_dc = s_health.spo2_red_dc_sum / samples;
+    float ir_dc = s_health.spo2_ir_dc_sum / samples;
+
+    if (red_dc < SPO2_MIN_DC || ir_dc < SPO2_MIN_DC) {
         return;
     }
 
-    s_health.spo2 = 104.0f - 6.0f * ratio_rms;
-    if (s_health.spo2 > 99.9f) {
-        s_health.spo2 = 99.9f;
-    } else if (s_health.spo2 < 0.0f) {
-        s_health.spo2 = 0.0f;
+    float ratio = (red_amp / red_dc) / (ir_amp / ir_dc);
+    s_reading.spo2_ratio = ratio;
+
+    if (!isfinite(ratio) || ratio < SPO2_RATIO_MIN || ratio > SPO2_RATIO_MAX) {
+        return;
+    }
+
+    float spo2_now = -45.060f * ratio * ratio + 30.354f * ratio + 94.845f;
+    spo2_now = constrain(spo2_now, 70.0f, 99.9f);
+
+    if (s_health.spo2 <= 0.0f) {
+        s_health.spo2 = spo2_now;
+    } else {
+        s_health.spo2 = s_health.spo2 * (1.0f - SPO2_FILTER_ALPHA) +
+                        spo2_now * SPO2_FILTER_ALPHA;
     }
 
     s_reading.spo2 = s_health.spo2;
     s_health.last_spo2_ms = now;
+}
+
+static void record_spo2_sample(float red_ac, float ir_ac, float red_dc, float ir_dc)
+{
+    if (!s_health.spo2_window_started) {
+        s_health.spo2_red_ac_min = red_ac;
+        s_health.spo2_red_ac_max = red_ac;
+        s_health.spo2_ir_ac_min = ir_ac;
+        s_health.spo2_ir_ac_max = ir_ac;
+        s_health.spo2_window_started = true;
+    } else {
+        if (red_ac < s_health.spo2_red_ac_min) {
+            s_health.spo2_red_ac_min = red_ac;
+        }
+        if (red_ac > s_health.spo2_red_ac_max) {
+            s_health.spo2_red_ac_max = red_ac;
+        }
+        if (ir_ac < s_health.spo2_ir_ac_min) {
+            s_health.spo2_ir_ac_min = ir_ac;
+        }
+        if (ir_ac > s_health.spo2_ir_ac_max) {
+            s_health.spo2_ir_ac_max = ir_ac;
+        }
+    }
+
+    s_health.spo2_red_dc_sum += red_dc;
+    s_health.spo2_ir_dc_sum += ir_dc;
+
+    if (s_health.spo2_window_samples < UINT16_MAX) {
+        ++s_health.spo2_window_samples;
+    }
+
 }
 
 static bool process_sample(uint32_t red, uint32_t ir, unsigned long now)
@@ -563,6 +717,7 @@ static bool process_sample(uint32_t red, uint32_t ir, unsigned long now)
         reset_signal_state(false);
         s_health.low_ir_samples = 0;
         s_health.last_finger_present = true;
+        begin_settle(now, REF_STARTUP_DISCARD_MS, true);
     }
 
     handle_saturation(red, ir, now);
@@ -581,28 +736,29 @@ static bool process_sample(uint32_t red, uint32_t ir, unsigned long now)
     s_health.ir_dc = s_health.dc_ir.w;
     s_health.red_dc = s_health.dc_red.w;
     s_reading.red_ir_dc_diff = static_cast<int32_t>(s_health.red_dc - s_health.ir_dc);
-
-    s_health.ir_ac_sq_sum += s_health.dc_ir.result * s_health.dc_ir.result;
-    s_health.red_ac_sq_sum += s_health.dc_red.result * s_health.dc_red.result;
-    if (s_health.samples_recorded < UINT16_MAX) {
-        ++s_health.samples_recorded;
-    }
-
-    if (ref_detect_pulse(s_health.lpb_ir.result, now) && s_health.samples_recorded > 0) {
-        s_reading.pulse_detected = true;
-        ++s_health.pulses_detected;
-        update_spo2_after_pulse(now);
-
-        if ((s_health.pulses_detected % REF_RESET_SPO2_EVERY_N_PULSES) == 0) {
-            s_health.ir_ac_sq_sum = 0.0f;
-            s_health.red_ac_sq_sum = 0.0f;
-            s_health.samples_recorded = 0;
-        }
-    }
-
     s_reading.ir_cardiogram = s_health.lpb_ir.result;
     s_reading.dc_filtered_ir = s_health.dc_ir.result;
     s_reading.dc_filtered_red = s_health.dc_red.result;
+
+    if (fabsf(s_health.lpb_ir.result) > REF_ARTIFACT_CARDIOGRAM_LIMIT) {
+        begin_settle(now, REF_ARTIFACT_DISCARD_MS, false);
+        ++s_reading.rejected_pulses;
+        return true;
+    }
+
+    if (now < s_health.settle_until_ms) {
+        refresh_schedule_fields(now);
+        return true;
+    }
+
+    record_spo2_sample(s_health.dc_red.result, s_health.dc_ir.result, ref_red, ref_ir);
+
+    if (ref_detect_pulse(s_health.lpb_ir.result, now) && s_health.spo2_window_samples > 0) {
+        s_reading.pulse_detected = true;
+        ++s_health.pulses_detected;
+        update_spo2_after_pulse(now);
+        reset_spo2_window();
+    }
 
     balance_led_currents(now);
     return true;

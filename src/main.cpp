@@ -77,11 +77,31 @@ static void report_serial()
         Serial.print("--");
     }
 
+    Serial.print(" R=");
+    if (r.spo2_ratio > 0.0f) {
+        Serial.print(r.spo2_ratio, 3);
+    } else {
+        Serial.print("--");
+    }
+
+    Serial.print(" Amp=");
+    Serial.print(r.spo2_red_amp, 0);
+    Serial.print("/");
+    Serial.print(r.spo2_ir_amp, 0);
+
     Serial.print(" Finger=");
     Serial.print(r.finger_present ? 1 : 0);
 
     Serial.print(" Pulse=");
     Serial.print(r.pulse_detected ? 1 : 0);
+
+    Serial.print(" Settle=");
+    if (r.settling) {
+        Serial.print(r.settle_remaining_ms);
+        Serial.print("ms");
+    } else {
+        Serial.print("0");
+    }
 
     Serial.print(" Cand=");
     Serial.print(r.last_candidate_ms);

@@ -104,6 +104,11 @@ static const char *display_status_text(const Max30102Reading &reading, uint16_t 
         return "PLACE FINGER";
     }
 
+    if (reading.settling) {
+        color = COLOR_GOLD;
+        return "SIGNAL SETTLING";
+    }
+
     if (reading.saturated) {
         color = COLOR_FAIL;
         return "SIGNAL SATURATED";

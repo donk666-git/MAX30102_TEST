@@ -14,6 +14,9 @@ struct Max30102Reading {
     float last_candidate_bpm = 0.0f;
     float last_accepted_bpm = 0.0f;
     float last_peak_value = 0.0f;
+    float spo2_ratio = 0.0f;
+    float spo2_red_amp = 0.0f;
+    float spo2_ir_amp = 0.0f;
     uint32_t sample_count = 0;
     uint32_t accepted_pulses = 0;
     uint32_t rejected_pulses = 0;
@@ -35,9 +38,11 @@ struct Max30102Reading {
     bool finger_present = false;
     bool pulse_detected = false;
     bool saturated = false;
+    bool settling = false;
     bool measurement_active = false;
     unsigned long active_elapsed_ms = 0;
     unsigned long active_remaining_ms = 0;
+    unsigned long settle_remaining_ms = 0;
     unsigned long next_measurement_ms = 0;
     uint8_t init_error = 0;
 };

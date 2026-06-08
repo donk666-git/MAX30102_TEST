@@ -4,11 +4,15 @@
 #include <SPI.h>
 #include <math.h>
 #include "../config.h"
+#include "../comms/time_api.h"
+#include "../comms/web_api.h"
 
 static constexpr uint16_t COLOR_BG = 0x0801;
 static constexpr uint16_t COLOR_PANEL = 0x1082;
+static constexpr uint16_t COLOR_SURFACE = 0x10A2;
 static constexpr uint16_t COLOR_GRID = 0x2104;
 static constexpr uint16_t COLOR_MUTED = 0x7BEF;
+static constexpr uint16_t COLOR_TEXT = 0xE73C;
 static constexpr uint16_t COLOR_RED = 0xF98C;
 static constexpr uint16_t COLOR_BLUE = 0x07FF;
 static constexpr uint16_t COLOR_GREEN = 0x07E0;
@@ -19,9 +23,9 @@ static constexpr uint16_t COLOR_FAIL = 0xF800;
 static constexpr int SCREEN_CX = 120;
 static constexpr int SCREEN_CY = 120;
 static constexpr int WAVE_X = 18;
-static constexpr int WAVE_Y = 134;
+static constexpr int WAVE_Y = 144;
 static constexpr int WAVE_W = 204;
-static constexpr int WAVE_H = 70;
+static constexpr int WAVE_H = 58;
 static constexpr uint8_t WAVE_POINTS = 96;
 static constexpr float WAVE_MIN_DISPLAY_RANGE = 700.0f;
 static constexpr float WAVE_OUTLIER_LIMIT = 1800.0f;
@@ -57,6 +61,47 @@ static void draw_small_text(const char *text, int16_t x, int16_t y, uint16_t col
     tft.setTextColor(color, bg);
     tft.setCursor(x, y);
     tft.print(text);
+}
+
+static void draw_right_text(const char *text, int16_t right_x, int16_t y, uint8_t size, uint16_t color, uint16_t bg)
+{
+    tft.setFont();
+    tft.setTextSize(size);
+    tft.setTextColor(color, bg);
+
+    int16_t x1 = 0;
+    int16_t y1 = 0;
+    uint16_t w = 0;
+    uint16_t h = 0;
+    tft.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
+    tft.setCursor(right_x - static_cast<int>(w), y);
+    tft.print(text);
+}
+
+static void draw_status_dot(int16_t x, int16_t y, uint16_t color)
+{
+    tft.fillCircle(x, y, 3, color);
+}
+
+static void draw_metric_column(const char *label,
+                               const char *value,
+                               int16_t x,
+                               int16_t w,
+                               uint16_t color)
+{
+    tft.fillRect(x, 112, w, 24, COLOR_BG);
+    draw_small_text(label, x + 2, 112, COLOR_MUTED, COLOR_BG);
+
+    tft.setFont();
+    tft.setTextSize(1);
+    tft.setTextColor(color, COLOR_BG);
+    int16_t x1 = 0;
+    int16_t y1 = 0;
+    uint16_t tw = 0;
+    uint16_t th = 0;
+    tft.getTextBounds(value, 0, 124, &x1, &y1, &tw, &th);
+    tft.setCursor(x + (w - static_cast<int>(tw)) / 2, 124);
+    tft.print(value);
 }
 
 static void push_wave_value(float value, bool active)
@@ -120,16 +165,17 @@ static const char *display_status_text(const Max30102Reading &reading, uint16_t 
     }
 
     color = COLOR_GREEN;
-    return "PULSE LOCK";
+    return "LOCKED";
 }
 
 static void draw_wave_frame()
 {
-    tft.drawRoundRect(WAVE_X, WAVE_Y, WAVE_W, WAVE_H, 6, COLOR_PANEL);
+    tft.drawRoundRect(WAVE_X, WAVE_Y, WAVE_W, WAVE_H, 4, COLOR_PANEL);
     tft.drawLine(WAVE_X + 4, WAVE_Y + WAVE_H / 2, WAVE_X + WAVE_W - 5, WAVE_Y + WAVE_H / 2, COLOR_GRID);
     for (int x = WAVE_X + 4 + 34; x < WAVE_X + WAVE_W - 4; x += 34) {
         tft.drawLine(x, WAVE_Y + 6, x, WAVE_Y + WAVE_H - 7, COLOR_GRID);
     }
+    draw_small_text("PPG", WAVE_X + 6, WAVE_Y + 6, COLOR_MUTED, COLOR_BG);
 }
 
 static void draw_waveform(const Max30102Reading &reading)
@@ -184,14 +230,14 @@ static void draw_waveform(const Max30102Reading &reading)
 static void draw_display_shell()
 {
     tft.fillScreen(COLOR_BG);
-    tft.drawCircle(SCREEN_CX, SCREEN_CY, 118, COLOR_PANEL);
-    tft.drawCircle(SCREEN_CX, SCREEN_CY, 111, COLOR_GRID);
+    tft.drawCircle(SCREEN_CX, SCREEN_CY, 118, COLOR_SURFACE);
+    tft.drawCircle(SCREEN_CX, SCREEN_CY, 112, COLOR_GRID);
+    tft.drawCircle(SCREEN_CX, SCREEN_CY, 103, COLOR_PANEL);
 
-    draw_centered_text("MAX30102 REF ALG", 18, 1, COLOR_BLUE, COLOR_BG);
-    draw_small_text("SpO2", 24, 112, COLOR_BLUE, COLOR_BG);
-    draw_small_text("Temp", 96, 112, COLOR_GOLD, COLOR_BG);
-    draw_small_text("Hz", 172, 112, COLOR_GREEN, COLOR_BG);
-    draw_small_text("ref-filter waveform", 62, 214, COLOR_MUTED, COLOR_BG);
+    tft.drawLine(34, 42, 206, 42, COLOR_GRID);
+    tft.drawLine(36, 106, 204, 106, COLOR_GRID);
+    tft.drawLine(82, 112, 82, 134, COLOR_GRID);
+    tft.drawLine(158, 112, 158, 134, COLOR_GRID);
     draw_wave_frame();
 }
 
@@ -223,60 +269,72 @@ void max30102_debug_ui_update(const Max30102Reading &reading, const Max30205Read
     char buf[28];
     uint16_t status_color = COLOR_MUTED;
     const char *status = display_status_text(reading, status_color);
+    char time_buf[8];
+    char date_buf[8];
+    time_api_get_strings(time_buf, sizeof(time_buf), date_buf, sizeof(date_buf));
 
-    tft.fillRect(24, 34, 192, 12, COLOR_BG);
-    draw_centered_text(status, 36, 1, status_color, COLOR_BG);
+    tft.fillRect(24, 12, 192, 31, COLOR_BG);
+    draw_small_text(date_buf, 40, 15, time_api_is_valid() ? COLOR_MUTED : COLOR_ORANGE, COLOR_BG);
+    draw_centered_text(time_buf, 12, 2, time_api_is_valid() ? COLOR_TEXT : COLOR_MUTED, COLOR_BG);
 
-    tft.fillRect(20, 52, 200, 58, COLOR_BG);
+    const uint8_t clients = web_api_client_count();
+    const bool web_running = web_api_is_running();
+    snprintf(buf, sizeof(buf), web_running ? "AP%u" : "WEB OFF", clients);
+    draw_right_text(buf,
+                    200,
+                    15,
+                    1,
+                    clients > 0 ? COLOR_GREEN : (web_running ? COLOR_BLUE : COLOR_MUTED),
+                    COLOR_BG);
+    draw_status_dot(207, 19, clients > 0 ? COLOR_GREEN : (web_running ? COLOR_BLUE : COLOR_MUTED));
+
+    tft.fillRect(34, 45, 172, 10, COLOR_BG);
+    draw_centered_text(status, 46, 1, status_color, COLOR_BG);
+
+    tft.fillRect(36, 58, 168, 47, COLOR_BG);
     if (reading.bpm > 0.0f) {
         snprintf(buf, sizeof(buf), "%d", static_cast<int>(reading.bpm + 0.5f));
-        draw_centered_text(buf, 58, 5, COLOR_RED, COLOR_BG);
+        draw_centered_text(buf, 58, 4, COLOR_RED, COLOR_BG);
     } else {
-        draw_centered_text("--", 58, 5, COLOR_MUTED, COLOR_BG);
+        draw_centered_text("--", 58, 4, COLOR_MUTED, COLOR_BG);
     }
-    draw_centered_text("BPM", 102, 1, COLOR_MUTED, COLOR_BG);
+    draw_centered_text("BPM", 94, 1, COLOR_MUTED, COLOR_BG);
 
-    tft.fillRect(20, 122, 62, 12, COLOR_BG);
+    char spo2_value[12];
     if (reading.spo2 > 0.0f) {
-        snprintf(buf, sizeof(buf), "%.1f%%", reading.spo2);
+        snprintf(spo2_value, sizeof(spo2_value), "%.0f%%", reading.spo2);
     } else {
-        snprintf(buf, sizeof(buf), "--");
+        snprintf(spo2_value, sizeof(spo2_value), "--");
     }
-    draw_small_text(buf, 24, 122, reading.spo2 > 0.0f ? COLOR_BLUE : COLOR_MUTED, COLOR_BG);
 
-    tft.fillRect(88, 122, 66, 12, COLOR_BG);
+    char temp_value[12];
     if (temperature.body_valid) {
-        snprintf(buf, sizeof(buf), "%.1fC", temperature.body_temperature_c);
+        snprintf(temp_value, sizeof(temp_value), "%.1fC", temperature.body_temperature_c);
     } else if (temperature.valid) {
-        snprintf(buf, sizeof(buf), "%.1fC", temperature.temperature_c);
+        snprintf(temp_value, sizeof(temp_value), "%.1fC", temperature.temperature_c);
     } else {
-        snprintf(buf, sizeof(buf), "--");
+        snprintf(temp_value, sizeof(temp_value), "--");
     }
-    draw_small_text(buf, 96, 122,
-                    temperature.body_valid ? COLOR_GREEN :
-                    (temperature.valid ? COLOR_GOLD : COLOR_MUTED),
-                    COLOR_BG);
 
-    tft.fillRect(162, 122, 48, 12, COLOR_BG);
-    snprintf(buf, sizeof(buf), "%u", reading.samples_last_second);
-    draw_small_text(buf, 172, 122, reading.samples_last_second > 0 ? COLOR_GREEN : COLOR_MUTED, COLOR_BG);
+    char hz_value[12];
+    snprintf(hz_value, sizeof(hz_value), "%u", reading.samples_last_second);
 
-    tft.fillRect(64, 222, 112, 10, COLOR_BG);
-    if (reading.measurement_active) {
-        if (reading.active_remaining_ms > 0) {
-            snprintf(buf, sizeof(buf), "ON %lus", reading.active_remaining_ms / 1000UL);
-        } else {
-            snprintf(buf, sizeof(buf), "LIVE");
-        }
-        draw_centered_text(buf, 222, 1, COLOR_GREEN, COLOR_BG);
-    } else {
-        long wait_ms = static_cast<long>(reading.next_measurement_ms - millis());
-        if (wait_ms < 0) {
-            wait_ms = 0;
-        }
-        snprintf(buf, sizeof(buf), "OFF %lds", wait_ms / 1000L);
-        draw_centered_text(buf, 222, 1, COLOR_MUTED, COLOR_BG);
-    }
+    draw_metric_column("SPO2", spo2_value, 24, 54, reading.spo2 > 0.0f ? COLOR_BLUE : COLOR_MUTED);
+    draw_metric_column(temperature.body_valid ? "BODY" : "TEMP",
+                       temp_value,
+                       91,
+                       58,
+                       temperature.body_valid ? COLOR_GREEN :
+                       (temperature.valid ? COLOR_GOLD : COLOR_MUTED));
+    draw_metric_column("HZ", hz_value, 172, 38, reading.samples_last_second > 0 ? COLOR_GREEN : COLOR_MUTED);
 
     draw_waveform(reading);
+
+    tft.fillRect(38, 211, 164, 20, COLOR_BG);
+    snprintf(buf,
+             sizeof(buf),
+             "BIO %s  TMP %s",
+             reading.initialized ? "OK" : "--",
+             temperature.valid ? "OK" : "--");
+    draw_centered_text(buf, 213, 1, COLOR_MUTED, COLOR_BG);
 }

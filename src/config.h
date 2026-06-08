@@ -18,4 +18,8 @@ static constexpr int PIN_TFT_SCLK = 5;
 static constexpr uint8_t MAX30102_ADDR = 0x57;
 static constexpr uint8_t MAX30205_ADDR = 0x48;
 
+static constexpr const char *TIMEZONE = "CST-8";
+static constexpr const char *WEB_AP_SSID = "WatchTest";
+static constexpr const char *WEB_AP_PASSWORD = "";
+
 #endif

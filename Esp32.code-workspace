@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "watch_test",
+			"path": "."
+		}
+	],
+	"settings": {}
+}

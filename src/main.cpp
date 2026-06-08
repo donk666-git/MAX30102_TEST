@@ -4,15 +4,26 @@
 #include "drivers/i2c_bus.h"
 #include "drivers/max30102.h"
 #include "drivers/max30205.h"
+#include "comms/time_api.h"
+#include "comms/web_api.h"
 #include "ui/max30102_debug_ui.h"
 
+#include <time.h>
+
 static constexpr unsigned long DISPLAY_REFRESH_MS = 200;
-static constexpr unsigned long SERIAL_REPORT_MS = 1000;
+static constexpr unsigned long SERIAL_REPORT_MS = 2000;
+static constexpr unsigned long WEB_UPDATE_MS = 20;
+static constexpr size_t SERIAL_LINE_MAX = 96;
+
+static bool s_serial_verbose = false;
 
 static void report_serial()
 {
     const Max30102Reading &r = max30102_reading();
     const Max30205Reading &t = max30205_reading();
+    char time_buf[8];
+    char date_buf[8];
+    time_api_get_strings(time_buf, sizeof(time_buf), date_buf, sizeof(date_buf));
 
     Serial.print("Present=");
     Serial.print(r.present ? 1 : 0);
@@ -133,6 +144,20 @@ static void report_serial()
     Serial.print(max30205_init_error_text(t.init_error));
     Serial.print(")");
 
+    Serial.print(" Time=");
+    Serial.print(time_buf);
+    Serial.print(" ");
+    Serial.print(date_buf);
+    Serial.print("/");
+    Serial.print(time_api_is_valid() ? 1 : 0);
+
+    Serial.print(" WiFi=");
+    Serial.print(web_api_status_text());
+    Serial.print(" AP=");
+    Serial.print(web_api_ap_ip());
+    Serial.print(" Clients=");
+    Serial.print(web_api_client_count());
+
     Serial.print(" Finger=");
     Serial.print(r.finger_present ? 1 : 0);
 
@@ -195,16 +220,120 @@ static void report_serial()
     Serial.println(r.spo2_config, HEX);
 }
 
+static char *trim_line(char *line)
+{
+    while (*line == ' ' || *line == '\t') {
+        ++line;
+    }
+
+    char *end = line + strlen(line);
+    while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) {
+        --end;
+    }
+    *end = '\0';
+    return line;
+}
+
+static bool set_manual_time(int year, int month, int day, int hour, int minute, int second)
+{
+    struct tm tm_set = {};
+    tm_set.tm_year = year - 1900;
+    tm_set.tm_mon = month - 1;
+    tm_set.tm_mday = day;
+    tm_set.tm_hour = hour;
+    tm_set.tm_min = minute;
+    tm_set.tm_sec = second;
+    tm_set.tm_isdst = -1;
+
+    time_t epoch = mktime(&tm_set);
+    if (epoch < 0) {
+        return false;
+    }
+
+    return time_api_set_epoch(static_cast<long>(epoch));
+}
+
+static void handle_serial_command(char *raw_line)
+{
+    char *line = trim_line(raw_line);
+    if (line[0] == '\0') {
+        return;
+    }
+
+    if (strcmp(line, "LOUD") == 0) {
+        s_serial_verbose = true;
+        Serial.println("serial output ON");
+    } else if (strcmp(line, "QUIET") == 0) {
+        s_serial_verbose = false;
+        Serial.println("serial output OFF");
+    } else if (strcmp(line, "WEB ON") == 0) {
+        web_api_init();
+        Serial.print("web ON AP=");
+        Serial.print(WEB_AP_SSID);
+        Serial.print(" URL=http://");
+        Serial.print(web_api_ap_ip());
+        Serial.println("/");
+    } else if (strcmp(line, "WEB OFF") == 0) {
+        web_api_stop();
+        Serial.println("web OFF");
+    } else if (strcmp(line, "STATUS") == 0) {
+        report_serial();
+    } else if (strncmp(line, "SET ", 4) == 0) {
+        int y = 0;
+        int mo = 0;
+        int d = 0;
+        int h = 0;
+        int mi = 0;
+        int s = 0;
+        if (sscanf(line, "SET %d %d %d %d %d %d", &y, &mo, &d, &h, &mi, &s) == 6 &&
+            set_manual_time(y, mo, d, h, mi, s)) {
+            Serial.printf("RTC set: %04d-%02d-%02d %02d:%02d:%02d\n", y, mo, d, h, mi, s);
+        } else {
+            Serial.println("Usage: SET 2026 6 3 14 30 0");
+        }
+    } else {
+        Serial.println("Commands: LOUD, QUIET, STATUS, WEB ON, WEB OFF, SET y m d h m s");
+    }
+}
+
+static void handle_serial_input()
+{
+    static char line[SERIAL_LINE_MAX];
+    static size_t len = 0;
+
+    while (Serial.available() > 0) {
+        char c = static_cast<char>(Serial.read());
+
+        if (c == '\n' || c == '\r') {
+            if (len > 0) {
+                line[len] = '\0';
+                handle_serial_command(line);
+                len = 0;
+            }
+            continue;
+        }
+
+        if (len < SERIAL_LINE_MAX - 1) {
+            line[len++] = c;
+        } else {
+            len = 0;
+            Serial.println("serial command too long");
+        }
+    }
+}
+
 void setup()
 {
     delay(1000);
 
     Serial.begin(115200, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+    Serial.setTimeout(10);
     delay(500);
 
     Serial.println();
     Serial.println("===== MAX30102 reference algorithm test =====");
 
+    time_api_init();
     max30102_debug_ui_begin();
     i2c_bus_init();
     delay(300);
@@ -229,6 +358,9 @@ void setup()
     Serial.print("Temp config=0x");
     Serial.println(max30205_reading().config, HEX);
 
+    Serial.println("Web AP default OFF. Type WEB ON to start http://192.168.4.1/");
+    Serial.println("Commands: LOUD, QUIET, STATUS, WEB ON, WEB OFF, SET y m d h m s");
+
     max30102_debug_ui_update(max30102_reading(), max30205_reading());
 }
 
@@ -236,7 +368,9 @@ void loop()
 {
     static unsigned long last_report = 0;
     static unsigned long last_display_refresh = 0;
+    static unsigned long last_web_update = 0;
 
+    handle_serial_input();
     bool got_sample = max30102_update();
     max30205_update();
     const Max30102Reading &reading = max30102_reading();
@@ -244,7 +378,12 @@ void loop()
     max30102_debug_ui_push_sample(reading, got_sample);
 
     unsigned long now = millis();
-    if (now - last_report >= SERIAL_REPORT_MS) {
+    if (now - last_web_update >= WEB_UPDATE_MS) {
+        last_web_update = now;
+        web_api_update();
+    }
+
+    if (s_serial_verbose && now - last_report >= SERIAL_REPORT_MS) {
         last_report = now;
         report_serial();
     }

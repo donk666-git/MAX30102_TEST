@@ -1,0 +1,23 @@
+name: watch_app
+description: ESP32 watch telemetry dashboard.
+publish_to: "none"
+
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_blue_plus: 2.2.1
+  fl_chart: 1.2.0
+  permission_handler: 11.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: 4.0.0
+
+flutter:
+  uses-material-design: true

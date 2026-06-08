@@ -4,6 +4,7 @@
 #include "drivers/i2c_bus.h"
 #include "drivers/max30102.h"
 #include "drivers/max30205.h"
+#include "comms/ble_api.h"
 #include "comms/time_api.h"
 #include "comms/web_api.h"
 #include "ui/max30102_debug_ui.h"
@@ -158,6 +159,9 @@ static void report_serial()
     Serial.print(" Clients=");
     Serial.print(web_api_client_count());
 
+    Serial.print(" BLE=");
+    Serial.print(ble_api_status_text());
+
     Serial.print(" Finger=");
     Serial.print(r.finger_present ? 1 : 0);
 
@@ -267,6 +271,7 @@ static void handle_serial_command(char *raw_line)
         s_serial_verbose = false;
         Serial.println("serial output OFF");
     } else if (strcmp(line, "WEB ON") == 0) {
+        ble_api_stop();
         web_api_init();
         Serial.print("web ON AP=");
         Serial.print(WEB_AP_SSID);
@@ -276,6 +281,13 @@ static void handle_serial_command(char *raw_line)
     } else if (strcmp(line, "WEB OFF") == 0) {
         web_api_stop();
         Serial.println("web OFF");
+    } else if (strcmp(line, "BLE ON") == 0) {
+        web_api_stop();
+        ble_api_start();
+        Serial.println("BLE ON name=ESP32-Watch");
+    } else if (strcmp(line, "BLE OFF") == 0) {
+        ble_api_stop();
+        Serial.println("BLE OFF");
     } else if (strcmp(line, "STATUS") == 0) {
         report_serial();
     } else if (strncmp(line, "SET ", 4) == 0) {
@@ -292,7 +304,7 @@ static void handle_serial_command(char *raw_line)
             Serial.println("Usage: SET 2026 6 3 14 30 0");
         }
     } else {
-        Serial.println("Commands: LOUD, QUIET, STATUS, WEB ON, WEB OFF, SET y m d h m s");
+        Serial.println("Commands: LOUD, QUIET, STATUS, WEB ON, WEB OFF, BLE ON, BLE OFF, SET y m d h m s");
     }
 }
 
@@ -358,8 +370,8 @@ void setup()
     Serial.print("Temp config=0x");
     Serial.println(max30205_reading().config, HEX);
 
-    Serial.println("Web AP default OFF. Type WEB ON to start http://192.168.4.1/");
-    Serial.println("Commands: LOUD, QUIET, STATUS, WEB ON, WEB OFF, SET y m d h m s");
+    Serial.println("Web AP and BLE default OFF. Type WEB ON or BLE ON.");
+    Serial.println("Commands: LOUD, QUIET, STATUS, WEB ON, WEB OFF, BLE ON, BLE OFF, SET y m d h m s");
 
     max30102_debug_ui_update(max30102_reading(), max30205_reading());
 }
@@ -373,6 +385,7 @@ void loop()
     handle_serial_input();
     bool got_sample = max30102_update();
     max30205_update();
+    ble_api_update(got_sample);
     const Max30102Reading &reading = max30102_reading();
     const Max30205Reading &temperature = max30205_reading();
     max30102_debug_ui_push_sample(reading, got_sample);
